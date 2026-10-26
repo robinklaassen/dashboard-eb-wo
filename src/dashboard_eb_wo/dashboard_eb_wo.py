@@ -342,11 +342,11 @@ with tab_em:
             """
             **Collectieve warmte**
             
-            Betere benutting van lokale warmtebronnen vermindert de vraag naar electriciteit
+            Betere benutting van lokale warmtebronnen vermindert de vraag naar elektriciteit.
             
             **Waterstof backbone**
             
-            Inzet van waterstof vermindert de vraag naar electriciteit
+            Inzet van waterstof vermindert de vraag naar elektriciteit.
             
             **Sturen in tijd**
             
