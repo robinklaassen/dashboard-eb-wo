@@ -26,9 +26,12 @@ def make_sheet_name(code: str, geo_level: str) -> str:
     return f"{code}_{geo_level.lower()}"
 
 
-def prepare_frame(data: dict[str, pl.DataFrame], sheet_code: str, geo_level: str, area: str) -> pl.DataFrame:
+def prepare_frame(
+    data: dict[str, pl.DataFrame], sheet_code: str, geo_level: str, area: str, order_scenarios: bool = True
+) -> pl.DataFrame:
     sheet_name = make_sheet_name(sheet_code, geo_level)
-    return data[sheet_name].filter(pl.col(geo_level).eq(area)).sort(pl.col("Scenario").cast(SCENARIOS))
+    filtered_data = data[sheet_name].filter(pl.col(geo_level).eq(area))
+    return filtered_data.sort(pl.col("Scenario").cast(SCENARIOS)) if order_scenarios else filtered_data
 
 
 @st.cache_data
@@ -48,10 +51,6 @@ st.set_page_config(
 ## HEADER ROW
 
 st.title(PAGE_TITLE)
-
-if st.checkbox("Toon beschikbare indicator labels"):
-    unique_labels = sorted({x.split("_")[0] for x in data})
-    st.write(" - ".join(unique_labels))
 
 selected_geo_level: str = st.segmented_control(
     "Geografische indeling",
@@ -76,7 +75,20 @@ if selected_geo_level != GeoLevel.PROVINCIE:
 else:
     selected_area = OVERIJSSEL
 
-tab_cw, tab_em, tab_else = st.tabs(["Collectieve warmte", "Energiemix", "Later meer..."])
+if st.checkbox("Toon ruwe data voor geselecteerd gebied"):
+    unique_labels = sorted({x.split("_")[0] for x in data})
+    selected_label = st.selectbox(
+        "Indicator label",
+        unique_labels,
+    )
+
+    try:
+        raw_frame = prepare_frame(data, selected_label, selected_geo_level, selected_area, False)
+        st.write(raw_frame)
+    except Exception as e:
+        st.badge(f"Fout: {e}", color="red")
+
+tab_cw, tab_em = st.tabs(["Collectieve warmte", "Energiemix"], on_change="rerun")
 
 ## TAB COLLECTIEVE WARMTE
 
@@ -137,8 +149,12 @@ with tab_cw:
         benutting_warmte_frame = prepare_frame(data, "1.5", selected_geo_level, selected_area)
 
         # st.write(benutting_warmte_frame)
-
-        warmte_potentie = benutting_warmte_frame.filter(pl.col("Scenario").eq("Huidig")).select("waarde_3").item() or 0
+        if "Huidig" in benutting_warmte_frame.get_column("Scenario"):
+            warmte_potentie = (
+                benutting_warmte_frame.filter(pl.col("Scenario").eq("Huidig")).select("waarde_3").item() or 0
+            )
+        else:
+            warmte_potentie = 0
 
         st.metric("Potentie warmte [TJ]", warmte_potentie)
 
@@ -252,3 +268,92 @@ with tab_cw:
         st.subheader("Profiel koude week")
         st.badge("TODO", color="yellow")
         # st.write("Data nog niet beschikbaar.")
+
+
+with tab_em:
+    ### FIRST ROW
+    col1, col2, col3 = st.columns([1, 1, 2], gap="medium", border=True)
+
+    with col1:
+        st.subheader("Opwek in ontwikkeling")
+
+        # 'plannen' (3.14b) not available for HSMS and Pocket levels
+        if selected_geo_level in [GeoLevel.PROVINCIE, GeoLevel.GEMEENTE]:
+            opwek_sheets = ["3.14a2", "3.14b", "3.14c2"]
+        else:
+            opwek_sheets = ["3.14a2", "3.14c2"]
+
+        opwek_data = pl.concat(
+            [
+                prepare_frame(data, sheet, selected_geo_level, selected_area, order_scenarios=False).cast(
+                    {"waarde_1": pl.Float64}
+                )
+                for sheet in opwek_sheets
+            ]
+        )
+
+        st.bar_chart(
+            opwek_data,
+            x="Scenario",
+            x_label="",
+            y="waarde_1",
+            y_label="",
+            color="Verbijzondering",
+            horizontal=True,
+            height="stretch",
+        )
+
+        st.badge("TODO vraag in grafiek als lijn?", color="yellow")
+
+        yearly_demand = prepare_frame(data, "3.14d", selected_geo_level, selected_area).select("waarde_1").item()
+        st.metric("Jaarlijkse elektriciteitsvraag [TJ]", yearly_demand)
+
+    with col2:
+        st.subheader("Keuze e-mix")
+        st.markdown(
+            """
+            De basis voor ons toekomstige energiesysteem zal bestaan uit elektriciteit. Door opwek en vraag 
+            slim af te stemmen op beschikbare ruimte en lokale potenties, kunnen we netcongestie beperken, 
+            maatschappelijke kosten verlagen en het energiesysteem betrouwbaarder maken. 
+            Zonder keuzes moeten netten worden uitgebreid, met grotere ruimtelijke impact en hogere kosten als gevolg.
+            """
+        )
+
+    with col3:
+        st.subheader("Benuttingsgraad")
+        st.write("Percentage")
+        # 3.15h has 'benuttingsgraad' in percentage per Scenario and 'SupplyStrategy' (wind/zon/kern)
+        benutting_frame = prepare_frame(data, "3.15h", selected_geo_level, selected_area, order_scenarios=False).pivot(
+            on="SupplyStrategy",
+            index="DemandScenario",
+            values="waarde_1",
+        )
+        st.write(benutting_frame)
+
+    ### SECOND ROW
+    col1, col2, col3 = st.columns([2, 1, 1], gap="medium", border=True)
+
+    with col1:
+        st.subheader("Weekprofielen vraag en opwek")
+
+    with col2:
+        st.subheader("Relatie verschilmakers")
+        st.markdown(
+            """
+            **Collectieve warmte**
+            
+            Betere benutting van lokale warmtebronnen vermindert de vraag naar electriciteit
+            
+            **Waterstof backbone**
+            
+            Inzet van waterstof vermindert de vraag naar electriciteit
+            
+            **Sturen in tijd**
+            
+            Door elektriciteitsvraag te verplaatsen van piek- naar dalmomenten neemt de benuttingsgraad toe.
+            """
+        )
+
+    with col3:
+        st.subheader("Ruimtevraag")
+        st.badge("Volgens mij ging deze niet door?", color="red")
