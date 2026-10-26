@@ -1,3 +1,4 @@
+import logging
 from enum import StrEnum
 from pathlib import Path
 
@@ -16,6 +17,9 @@ class GeoLevel(StrEnum):
     GEMEENTE = "Gemeente"
     HSMS = "HSMS"
     POCKET = "Pocket"
+
+
+logging.getLogger("fastexcel.types.dtype").setLevel(logging.ERROR)
 
 
 def make_sheet_name(code: str, geo_level: str) -> str:
