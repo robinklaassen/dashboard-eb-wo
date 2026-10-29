@@ -6,8 +6,17 @@ import polars as pl
 import streamlit as st
 
 REPORTS_FILE = "20261017 reports concept.xlsx"
+PROFILES_FILE = "20261017 timeseries_TL.parquet"
+PROFILES_REPORT_PREFIXES = [
+    "1.9a",
+    "1.9e",
+    "3.15d",
+    "3.15e",
+    "3.17a2",
+    "3.17b2",
+]
 
-PAGE_TITLE = "Verschilmakers West-Overijssel"
+PAGE_TITLE = "Verschilmakers Energiebeelden Overijssel"
 OVERIJSSEL = "Overijssel"
 SCENARIOS = pl.Enum(["Huidig", "Netbeheerder", "Gemeentelijk", "Provinciaal"])
 
@@ -19,6 +28,7 @@ class GeoLevel(StrEnum):
     POCKET = "Pocket"
 
 
+# suppress messages about not being able to recognize dtype (on empty columns mostly)
 logging.getLogger("fastexcel.types.dtype").setLevel(logging.ERROR)
 
 
@@ -40,7 +50,18 @@ def load_data() -> dict[str, pl.DataFrame]:
     return pl.read_excel(path, sheet_id=0)  # load all sheets as dict of frames
 
 
+@st.cache_data
+def load_profiles() -> pl.DataFrame:
+    path = Path(__file__).parent.parent.parent / "data" / PROFILES_FILE
+    return (
+        pl.scan_parquet(path)
+        .filter(pl.col("report_id").str.split("_").list.first().is_in(PROFILES_REPORT_PREFIXES))
+        .collect()
+    )
+
+
 data = load_data()
+profiles = load_profiles()
 
 st.set_page_config(
     page_title=PAGE_TITLE,
@@ -51,6 +72,7 @@ st.set_page_config(
 ## HEADER ROW
 
 st.title(PAGE_TITLE)
+st.badge("Dit is een prototype gebouwd in Streamlit (Python)", color="blue")
 
 selected_geo_level: str = st.segmented_control(
     "Geografische indeling",
@@ -75,7 +97,7 @@ if selected_geo_level != GeoLevel.PROVINCIE:
 else:
     selected_area = OVERIJSSEL
 
-if st.checkbox("Toon ruwe data voor geselecteerd gebied"):
+if st.checkbox("Toon 'reports' data per indicator label voor geselecteerd gebied"):
     unique_labels = sorted({x.split("_")[0] for x in data})
     selected_label = st.selectbox(
         "Indicator label",
@@ -144,7 +166,6 @@ with tab_cw:
     with col3:
         st.subheader("Benutting warmte")
         st.badge("TODO potentie in grafiek als lijn?", color="yellow")
-        # st.text("Mockup is niet uit de data te maken!")
 
         benutting_warmte_frame = prepare_frame(data, "1.5", selected_geo_level, selected_area)
 
@@ -262,12 +283,35 @@ with tab_cw:
             # height="stretch",
         )
 
-        # st.text("In provinciaal scenario")
-
     with col4:
         st.subheader("Profiel koude week")
         st.badge("TODO", color="yellow")
-        # st.write("Data nog niet beschikbaar.")
+
+        profile_cold1 = profiles.filter(
+            pl.col("report_id").eq(make_sheet_name("1.9a", selected_geo_level)),
+            pl.col(selected_geo_level).eq(selected_area),
+        )
+
+        profile_cold2 = profiles.filter(
+            pl.col("report_id").eq(make_sheet_name("1.9e", selected_geo_level)),
+            pl.col(selected_geo_level).eq(selected_area),
+        )
+
+        profile_cold = pl.concat([profile_cold1, profile_cold2])
+
+        # st.write(profile_cold)
+
+        st.line_chart(
+            profile_cold.with_columns(
+                pl.col("Timestamp").str.to_datetime(),
+            ),
+            x="Timestamp",
+            x_label="",
+            y="Value",
+            y_label="Vermogen [MW]",  # TODO wat is de eenheid? lijkt niet te kloppen met piekvermogen
+            color="report_name",
+            height="stretch",
+        )
 
 
 with tab_em:
@@ -276,6 +320,7 @@ with tab_em:
 
     with col1:
         st.subheader("Opwek in ontwikkeling")
+        st.badge("TODO huidig als extra blok onder plannen en potentie", color="yellow")
 
         # 'plannen' (3.14b) not available for HSMS and Pocket levels
         if selected_geo_level in [GeoLevel.PROVINCIE, GeoLevel.GEMEENTE]:
@@ -321,20 +366,121 @@ with tab_em:
 
     with col3:
         st.subheader("Benuttingsgraad")
-        st.write("Percentage")
-        # 3.15h has 'benuttingsgraad' in percentage per Scenario and 'SupplyStrategy' (wind/zon/kern)
-        benutting_frame = prepare_frame(data, "3.15h", selected_geo_level, selected_area, order_scenarios=False).pivot(
-            on="SupplyStrategy",
-            index="DemandScenario",
-            values="waarde_1",
+
+        benutting_frame = (
+            prepare_frame(data, "3.15h", selected_geo_level, selected_area, order_scenarios=False)
+            .pivot(
+                on="SupplyStrategy",
+                index="DemandScenario",
+                values="waarde_1",
+            )
+            .with_columns(pl.selectors.numeric().round(1))
+            .select(pl.lit("Benuttingsgraad [%]").alias("Aspect"), "Zon", "Wind", "Kern", "DemandScenario")
         )
-        st.write(benutting_frame)
+        # TODO concat other frames for 'import' and 'curtailment', are they available?
+
+        benutting_scenario = st.segmented_control(
+            "Scenario",
+            ["Netbeheerder", "Gemeentelijk", "Provinciaal"],
+            default="Netbeheerder",
+            required=True,
+        )
+
+        st.write(benutting_frame.filter(pl.col("DemandScenario").eq(benutting_scenario)))
+
+        st.badge("TODO aanvullen met andere aspecten", color="yellow")
 
     ### SECOND ROW
-    col1, col2, col3 = st.columns([2, 1, 1], gap="medium", border=True)
+    col1, col2 = st.columns([3, 1], gap="medium", border=True)
 
     with col1:
         st.subheader("Weekprofielen vraag en opwek")
+
+        weekprofielen_scenario = st.segmented_control(
+            "Scenario",
+            ["Netbeheerder", "Gemeentelijk", "Provinciaal"],
+            default="Netbeheerder",
+            required=True,
+            key="weekprofielen_scenario",
+        )
+
+        # winter
+        st.markdown("**Winter**")
+        profile_supply_winter = profiles.filter(
+            pl.col("report_id").eq(make_sheet_name("3.15d", selected_geo_level)),
+            pl.col(selected_geo_level).eq(selected_area),
+            pl.col("DemandScenario").eq(weekprofielen_scenario),
+        )
+
+        profile_demand_winter = profiles.filter(
+            pl.col("report_id").eq(make_sheet_name("3.15e", selected_geo_level)),
+            pl.col(selected_geo_level).eq(selected_area),
+            pl.col("Scenario").eq(weekprofielen_scenario),
+        ).with_columns(pl.lit("Vraag").alias("SupplyStrategy"))
+
+        profile_winter = (
+            pl.concat(
+                [
+                    profile_supply_winter,
+                    profile_demand_winter,
+                ]
+            )
+            .pivot(
+                on="SupplyStrategy",
+                index="Timestamp",
+                values="Value",
+            )
+            .with_columns(pl.col("Timestamp").str.to_datetime())
+        )
+
+        # st.write(profile_supply)
+
+        # TODO plot 'Vraag' as area instead of line
+        st.line_chart(
+            profile_winter,
+            x="Timestamp",
+            y_label="Vermogen [MW]",
+            height="stretch",
+        )
+
+        # summer
+        st.markdown("**Zomer**")
+        profile_supply_summer = profiles.filter(
+            pl.col("report_id").eq(make_sheet_name("3.17a2", selected_geo_level)),
+            pl.col(selected_geo_level).eq(selected_area),
+            pl.col("DemandScenario").eq(weekprofielen_scenario),
+        )
+
+        profile_demand_summer = profiles.filter(
+            pl.col("report_id").eq(make_sheet_name("3.17b2", selected_geo_level)),
+            pl.col(selected_geo_level).eq(selected_area),
+            pl.col("Scenario").eq(weekprofielen_scenario),
+        ).with_columns(pl.lit("Vraag").alias("SupplyStrategy"))
+
+        profile_summer = (
+            pl.concat(
+                [
+                    profile_supply_summer,
+                    profile_demand_summer,
+                ]
+            )
+            .pivot(
+                on="SupplyStrategy",
+                index="Timestamp",
+                values="Value",
+            )
+            .with_columns(pl.col("Timestamp").str.to_datetime())
+        )
+
+        # st.write(profile_supply)
+
+        # TODO plot 'Vraag' as area instead of line
+        st.line_chart(
+            profile_summer,
+            x="Timestamp",
+            y_label="Vermogen [MW]",
+            height="stretch",
+        )
 
     with col2:
         st.subheader("Relatie verschilmakers")
@@ -353,7 +499,3 @@ with tab_em:
             Door elektriciteitsvraag te verplaatsen van piek- naar dalmomenten neemt de benuttingsgraad toe.
             """
         )
-
-    with col3:
-        st.subheader("Ruimtevraag")
-        st.badge("Volgens mij ging deze niet door?", color="red")
